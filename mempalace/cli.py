@@ -949,6 +949,54 @@ def _forward_mine_to_hub(args, palace_path: str) -> bool:
 
 
 def cmd_mine(args):
+    remote_url = getattr(args, "remote", None) or os.environ.get("MEMPALACE_REMOTE_URL")
+    remote_token = getattr(args, "token", None) or os.environ.get("MEMPALACE_MCP_HTTP_TOKEN")
+
+    if remote_url:
+        # Remote mining via HTTP MCP — delegate to tool_mine on the server
+        import json
+        import urllib.request
+        import urllib.error
+
+        # Normalize base URL: ensure it ends with /mcp exactly once
+        base = remote_url.rstrip("/")
+        if not base.endswith("/mcp"):
+            base += "/mcp"
+
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "mempalace_mine",
+                "arguments": {
+                    "source": args.dir,
+                    "mode": args.mode or "projects",
+                    "wing": args.wing,
+                    "agent": args.agent,
+                    "limit": args.limit or 0,
+                    "dry_run": args.dry_run,
+                    "extract": args.extract or "exchange",
+                },
+            },
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(base, data=data, method="POST")
+        req.add_header("Content-Type", "application/json")
+        if remote_token:
+            req.add_header("Authorization", f"Bearer {remote_token}")
+        try:
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                body = resp.read().decode("utf-8")
+                print(body)
+        except urllib.error.HTTPError as e:
+            print(f"mempalace: remote mine failed: {e.code} {e.reason}", file=sys.stderr)
+            sys.exit(1)
+        except urllib.error.URLError as e:
+            print(f"mempalace: remote mine connection error: {e.reason}", file=sys.stderr)
+            sys.exit(1)
+        return
+
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
     mode = getattr(args, "mode", None) or "projects"
     source_adapter = getattr(args, "source", None)
@@ -2994,11 +3042,18 @@ def cmd_compress(args):
     if col is None:
         sys.exit(1)
 
-    # Query drawers in batches to avoid SQLite variable limit (~999)
+    # Process drawers in batches to keep memory bounded and make progress
+    # visible. The previous implementation retained the complete palace and
+    # all compressed output until the final write, which made large palaces
+    # appear hung and made interruption lose all completed compression work.
     where = {"wing": args.wing} if args.wing else None
     _BATCH = 500
-    docs, metas, ids = [], [], []
     offset = 0
+    total_original = 0
+    total_compressed = 0
+    processed = 0
+    comp_col = None
+
     while True:
         try:
             kwargs = {
@@ -3010,78 +3065,78 @@ def cmd_compress(args):
                 kwargs["where"] = where
             batch = col.get(**kwargs)
         except Exception as e:
-            if not docs:
-                print(f"\n  Error reading drawers: {e}")
-                sys.exit(1)
-            break
+            print(f"\n  Error reading drawers after {processed} drawers: {e}")
+            sys.exit(1)
+
         batch_docs = batch.get("documents", [])
         if not batch_docs:
             break
-        docs.extend(batch_docs)
-        metas.extend(batch.get("metadatas", []))
-        ids.extend(batch.get("ids", []))
+        batch_metas = batch.get("metadatas") or []
+        batch_ids = batch.get("ids") or []
+        compressed_entries = []
+
+        if processed == 0:
+            print(
+                "\n  Compressing drawers" + (f" in wing '{args.wing}'" if args.wing else "") + "..."
+            )
+            print()
+
+        for doc, meta, doc_id in zip(batch_docs, batch_metas, batch_ids):
+            compressed = dialect.compress(doc, metadata=meta)
+            stats = dialect.compression_stats(doc, compressed)
+
+            total_original += stats["original_chars"]
+            total_compressed += stats["summary_chars"]
+            compressed_entries.append((doc_id, compressed, meta, stats))
+
+            if args.dry_run:
+                wing_name = meta.get("wing", "?")
+                room_name = meta.get("room", "?")
+                source = Path(meta.get("source_file", "?")).name
+                print(f"  [{wing_name}/{room_name}] {source}")
+                print(
+                    f"    {stats['original_tokens_est']}t -> {stats['summary_tokens_est']}t ({stats['size_ratio']:.1f}x)"
+                )
+                print(f"    {compressed}")
+                print()
+
+        # Store each completed page immediately. Re-running is safe because
+        # drawer IDs are stable and upsert is idempotent for a given ID.
+        if not args.dry_run and compressed_entries:
+            try:
+                if comp_col is None:
+                    # Route through palace.get_closets_collection so the shared
+                    # _DEFAULT_BACKEND is reused.
+                    comp_col = get_closets_collection(palace_path, create=True)
+                comp_col.upsert(
+                    ids=[entry[0] for entry in compressed_entries],
+                    documents=[entry[1] for entry in compressed_entries],
+                    metadatas=[
+                        {
+                            **entry[2],
+                            "compression_ratio": round(entry[3]["size_ratio"], 1),
+                            "original_tokens": entry[3]["original_tokens_est"],
+                        }
+                        for entry in compressed_entries
+                    ],
+                )
+            except Exception as e:
+                print(f"  Error storing compressed drawers after {processed} drawers: {e}")
+                sys.exit(1)
+
+        processed += len(compressed_entries)
         offset += len(batch_docs)
+        print(f"  Processed {processed} drawers", flush=True)
         if len(batch_docs) < _BATCH:
             break
 
-    if not docs:
+    if not processed:
         wing_label = f" in wing '{args.wing}'" if args.wing else ""
         print(f"\n  No drawers found{wing_label}.")
         return
 
-    print(
-        f"\n  Compressing {len(docs)} drawers"
-        + (f" in wing '{args.wing}'" if args.wing else "")
-        + "..."
-    )
-    print()
-
-    total_original = 0
-    total_compressed = 0
-    compressed_entries = []
-
-    for doc, meta, doc_id in zip(docs, metas, ids):
-        compressed = dialect.compress(doc, metadata=meta)
-        stats = dialect.compression_stats(doc, compressed)
-
-        total_original += stats["original_chars"]
-        total_compressed += stats["summary_chars"]
-
-        compressed_entries.append((doc_id, compressed, meta, stats))
-
-        if args.dry_run:
-            wing_name = meta.get("wing", "?")
-            room_name = meta.get("room", "?")
-            source = Path(meta.get("source_file", "?")).name
-            print(f"  [{wing_name}/{room_name}] {source}")
-            print(
-                f"    {stats['original_tokens_est']}t -> {stats['summary_tokens_est']}t ({stats['size_ratio']:.1f}x)"
-            )
-            print(f"    {compressed}")
-            print()
-
-    # Store compressed versions (unless dry-run)
     if not args.dry_run:
-        try:
-            # Route through palace.get_closets_collection so the shared
-            # _DEFAULT_BACKEND is reused (avoids a redundant ChromaBackend
-            # instance and its potential WAL-lock contention on Windows).
-            comp_col = get_closets_collection(palace_path, create=True)
-            for doc_id, compressed, meta, stats in compressed_entries:
-                comp_meta = dict(meta)
-                comp_meta["compression_ratio"] = round(stats["size_ratio"], 1)
-                comp_meta["original_tokens"] = stats["original_tokens_est"]
-                comp_col.upsert(
-                    ids=[doc_id],
-                    documents=[compressed],
-                    metadatas=[comp_meta],
-                )
-            print(
-                f"  Stored {len(compressed_entries)} compressed drawers in 'mempalace_closets' collection."
-            )
-        except Exception as e:
-            print(f"  Error storing compressed drawers: {e}")
-            sys.exit(1)
+        print(f"  Stored {processed} compressed drawers in 'mempalace_closets' collection.")
 
     # Summary
     ratio = total_original / max(total_compressed, 1)
@@ -3317,6 +3372,16 @@ def main():
         choices=["exchange", "general"],
         default="exchange",
         help="Extraction strategy for convos mode: 'exchange' (default) or 'general' (5 memory types)",
+    )
+    p_mine.add_argument(
+        "--remote",
+        default=None,
+        help="Remote MemPalace HTTP MCP URL (e.g. http://server:8765/mcp). When set, mine delegates to the server via JSON-RPC instead of running locally.",
+    )
+    p_mine.add_argument(
+        "--token",
+        default=None,
+        help="Bearer token for --remote (or set MEMPALACE_MCP_HTTP_TOKEN)",
     )
 
     p_mine.add_argument(

@@ -62,6 +62,14 @@ mkdir -p "$STATE_DIR"
 # Example: MEMPAL_DIR="$HOME/projects/my_app"
 MEMPAL_DIR=""
 
+# Optional remote shared brain (HTTP MCP). When set, `mempalace mine` uses
+# --remote and --token so every agent writes to the same palace.
+# Example:
+#   MEMPALACE_REMOTE_URL="http://brain-host:8765/mcp"
+#   MEMPALACE_MCP_HTTP_TOKEN="the-bearer-token"
+REMOTE_URL="${MEMPALACE_REMOTE_URL:-}"
+REMOTE_TOKEN="${MEMPALACE_MCP_HTTP_TOKEN:-}"
+
 # Resolve the Python interpreter the hook should use.
 #
 # Why this is nontrivial: GUI-launched Claude Code on macOS (or any harness
@@ -264,15 +272,23 @@ if [ "$SINCE_LAST" -ge "$SAVE_INTERVAL" ] && [ "$EXCHANGE_COUNT" -gt 0 ]; then
     #      (code, notes, docs)
     # MEMPAL_DIR is *additive*, not an override: a user with MEMPAL_DIR
     # pointed at their project still gets the active conversation mined.
+    REMOTE_ARGS=""
+    if [ -n "$REMOTE_URL" ]; then
+        REMOTE_ARGS="--remote $REMOTE_URL"
+        if [ -n "$REMOTE_TOKEN" ]; then
+            REMOTE_ARGS="$REMOTE_ARGS --token $REMOTE_TOKEN"
+        fi
+    fi
+
     if is_valid_transcript_path "$TRANSCRIPT_PATH" && [ -f "$TRANSCRIPT_PATH" ]; then
-        "$MEMPAL_PYTHON_BIN" -m mempalace mine "$(dirname "$TRANSCRIPT_PATH")" --mode convos \
+        "$MEMPAL_PYTHON_BIN" -m mempalace mine "$(dirname "$TRANSCRIPT_PATH")" --mode convos $REMOTE_ARGS \
             >> "$STATE_DIR/hook.log" 2>&1 &
     elif [ -n "$TRANSCRIPT_PATH" ]; then
         echo "[$(date '+%H:%M:%S')] Skipping invalid transcript path: $TRANSCRIPT_PATH" \
             >> "$STATE_DIR/hook.log"
     fi
     if [ -n "$MEMPAL_DIR" ] && [ -d "$MEMPAL_DIR" ]; then
-        "$MEMPAL_PYTHON_BIN" -m mempalace mine "$MEMPAL_DIR" --mode projects \
+        "$MEMPAL_PYTHON_BIN" -m mempalace mine "$MEMPAL_DIR" --mode projects $REMOTE_ARGS \
             >> "$STATE_DIR/hook.log" 2>&1 &
     fi
 

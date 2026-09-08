@@ -1982,6 +1982,56 @@ def test_cmd_compress_stores_results(mock_config_cls, capsys):
     assert "mempalace_closets" in out
 
 
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_compress_writes_each_batch_and_reports_progress(mock_config_cls, capsys):
+    """Large compression runs do not retain or defer completed batches."""
+    mock_config_cls.return_value.palace_path = "/fake/palace"
+    args = argparse.Namespace(palace=None, wing=None, dry_run=False, config=None)
+    mock_col = MagicMock()
+    first_batch_docs = [f"text {i}" for i in range(500)]
+    first_batch_metas = [{"wing": "w"} for _ in first_batch_docs]
+    first_batch_ids = [f"id{i}" for i in range(500)]
+    mock_col.get.side_effect = [
+        {
+            "documents": first_batch_docs,
+            "metadatas": first_batch_metas,
+            "ids": first_batch_ids,
+        },
+        {
+            "documents": ["text three"],
+            "metadatas": [{"wing": "w"}],
+            "ids": ["id3"],
+        },
+        {"documents": [], "metadatas": [], "ids": []},
+    ]
+    mock_comp_col = MagicMock()
+    mock_dialect = MagicMock()
+    mock_dialect.compress.side_effect = lambda text, metadata=None: f"compressed {text}"
+    mock_dialect.compression_stats.return_value = {
+        "original_chars": 100,
+        "summary_chars": 30,
+        "original_tokens_est": 25,
+        "summary_tokens_est": 8,
+        "size_ratio": 3.3,
+        "note": "Estimates only.",
+    }
+    mock_dialect_mod = _make_mock_dialect_module(mock_dialect)
+
+    with (
+        patch("mempalace.palace._open_collection_or_explain", return_value=mock_col),
+        patch("mempalace.palace.get_closets_collection", return_value=mock_comp_col),
+        patch.dict("sys.modules", {"mempalace.dialect": mock_dialect_mod}),
+    ):
+        cmd_compress(args)
+
+    out = capsys.readouterr().out
+    assert "Processed 500 drawers" in out
+    assert "Processed 501 drawers" in out
+    assert mock_comp_col.upsert.call_count == 2
+    assert mock_comp_col.upsert.call_args_list[0].kwargs["ids"] == first_batch_ids
+    assert mock_comp_col.upsert.call_args_list[1].kwargs["ids"] == ["id3"]
+
+
 def test_cmd_compress_output_readable_via_get_closets_collection(tmp_path, capsys):
     """End-to-end: cmd_compress output must be readable via the same code
     path palace.py uses (`get_closets_collection`). Regression for #1244."""

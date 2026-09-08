@@ -1,14 +1,22 @@
 # MemPalace via Docker Compose.
 #
-# The MCP server speaks JSON-RPC over stdio, so the `mcp` service is meant to
-# be driven interactively (`docker compose run`), not left running detached:
+# The `mcp` service speaks JSON-RPC over stdio, so it is meant to be driven
+# interactively (`docker compose run`), not left running detached. The optional
+# `server` profile exposes the same MCP API over HTTP:
 #
 #   docker compose build
 #   docker compose run --rm mcp                       # MCP server over stdio
 #   docker compose run --rm mcp cli search "GraphQL"  # one-off CLI command
+#   docker compose --profile server up -d              # MCP over HTTP
+#   curl http://127.0.0.1:8765/healthz
 #
 # The named volume `mempalace-data` is mounted at /data and holds the palace,
 # config, and the cached embedding model across runs.
+#
+# The image also contains the importable Python API. Use the image's Python
+# interpreter directly when embedding MemPalace in a Python application:
+#
+#   docker compose run --rm --entrypoint python mcp -c "import mempalace"
 
 services:
   mcp:
@@ -21,15 +29,50 @@ services:
     tty: false
     volumes:
       - mempalace-data:/data
-    # Everything defaults correctly from HOME=/data (palace ->
-    # /data/.mempalace/palace, config -> /data/.mempalace, model cache ->
-    # /data/.cache), so no environment block is needed. Uncomment the key
-    # *together with* an entry under it for non-default locations — a bare
-    # `environment:` with only comments beneath parses as null, and Compose
-    # rejects the whole file with "services.mcp.environment must be a mapping".
-    # environment:
-    #   MEMPALACE_EMBEDDING_MODEL: embeddinggemma   # multilingual (default: minilm)
-    #   MEMPALACE_PALACE_PATH: /data/custom/palace
+    environment:
+      MEMPALACE_BACKEND: ${MEMPALACE_BACKEND:-chroma}
+      MEMPALACE_EMBEDDING_DEVICE: ${MEMPALACE_EMBEDDING_DEVICE:-auto}
+      # Everything defaults correctly from HOME=/data (palace ->
+      # /data/.mempalace/palace, config -> /data/.mempalace, model cache ->
+      # /data/.cache). Override here only for non-default locations, e.g.:
+      # MEMPALACE_EMBEDDING_MODEL=embeddinggemma   # multilingual
+      # MEMPALACE_PALACE_PATH=/data/custom/palace
+
+  # Optional HTTP MCP server. Do not run this alongside a writable stdio/CLI
+  # process against a local file-backed backend; use one writer at a time.
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mempalace:local
+    command:
+      - serve
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8765"
+    ports:
+      - "${MEMPALACE_PORT:-8765}:8765"
+    volumes:
+      - mempalace-data:/data
+    environment:
+      MEMPALACE_BACKEND: ${MEMPALACE_BACKEND:-chroma}
+      MEMPALACE_EMBEDDING_DEVICE: ${MEMPALACE_EMBEDDING_DEVICE:-auto}
+      MEMPALACE_MCP_HTTP_TOKEN: ${MEMPALACE_MCP_HTTP_TOKEN:-}
+      MEMPALACE_QDRANT_URL: ${MEMPALACE_QDRANT_URL:-}
+      MEMPALACE_QDRANT_API_KEY: ${MEMPALACE_QDRANT_API_KEY:-}
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:8765/healthz').read().strip()==b'ok' else sys.exit(1)"
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    profiles:
+      - server
 
 volumes:
   mempalace-data:

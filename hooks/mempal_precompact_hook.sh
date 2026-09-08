@@ -64,6 +64,9 @@ mkdir -p "$STATE_DIR"
 # Example: MEMPAL_DIR="$HOME/projects/my_app"
 MEMPAL_DIR=""
 
+REMOTE_URL="${MEMPALACE_REMOTE_URL:-}"
+REMOTE_TOKEN="${MEMPALACE_MCP_HTTP_TOKEN:-}"
+
 # Resolve the Python interpreter. Same contract as mempal_save_hook.sh:
 # MEMPAL_PYTHON (explicit override) → $(command -v python3) → bare python3.
 MEMPAL_PYTHON_BIN="${MEMPAL_PYTHON:-}"
@@ -181,15 +184,23 @@ echo "[$(date '+%H:%M:%S')] PRE-COMPACT triggered for session $SESSION_ID" >> "$
 # independent targets — both run if both are set:
 #   1. TRANSCRIPT_PATH (from Claude Code) → parent dir, --mode convos
 #   2. MEMPAL_DIR → --mode projects
+REMOTE_ARGS=""
+if [ -n "$REMOTE_URL" ]; then
+    REMOTE_ARGS="--remote $REMOTE_URL"
+    if [ -n "$REMOTE_TOKEN" ]; then
+        REMOTE_ARGS="$REMOTE_ARGS --token $REMOTE_TOKEN"
+    fi
+fi
+
 if is_valid_transcript_path "$TRANSCRIPT_PATH" && [ -f "$TRANSCRIPT_PATH" ]; then
-    "$MEMPAL_PYTHON_BIN" -m mempalace mine "$(dirname "$TRANSCRIPT_PATH")" --mode convos \
+    "$MEMPAL_PYTHON_BIN" -m mempalace mine "$(dirname "$TRANSCRIPT_PATH")" --mode convos $REMOTE_ARGS \
         >> "$STATE_DIR/hook.log" 2>&1
 elif [ -n "$TRANSCRIPT_PATH" ]; then
     echo "[$(date '+%H:%M:%S')] Skipping missing or invalid transcript path after normalization: $TRANSCRIPT_PATH" \
         >> "$STATE_DIR/hook.log"
 fi
 if [ -n "$MEMPAL_DIR" ] && [ -d "$MEMPAL_DIR" ]; then
-    "$MEMPAL_PYTHON_BIN" -m mempalace mine "$MEMPAL_DIR" --mode projects \
+    "$MEMPAL_PYTHON_BIN" -m mempalace mine "$MEMPAL_DIR" --mode projects $REMOTE_ARGS \
         >> "$STATE_DIR/hook.log" 2>&1
 fi
 

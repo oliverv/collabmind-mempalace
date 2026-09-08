@@ -8402,6 +8402,30 @@ def _serve_http(host: str, port: int) -> None:
             " (TLS)" if getattr(httpd, "scheme", "http") == "https" else "",
             " (read-only)" if _READ_ONLY else "",
         )
+        # Register endpoint so CLI `mine` etc. forward via DaemonClient (single-writer).
+        try:
+            from .daemon import (
+                endpoint_path as _ep,
+                _write_private as _wp,
+                canonical_palace_path as _cp,
+            )
+            import json
+            import os
+
+            p = _cp(_config.palace_path)
+            ep = {
+                "url": f"http://{host}:{bound_port}/mcp",
+                "host": host,
+                "port": bound_port,
+                "token": None,
+                "started_at": __import__("datetime")
+                .datetime.now(__import__("datetime").timezone.utc)
+                .isoformat(),
+                "pid": os.getpid(),
+            }
+            _wp(_ep(p), json.dumps(ep, indent=2) + "\n")
+        except Exception:
+            pass
         try:
             httpd.serve_forever(poll_interval=0.5)
         except KeyboardInterrupt:

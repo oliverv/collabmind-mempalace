@@ -47,3 +47,14 @@ target/
 *.dylib
 *.exe
 
+# OpenCode deepwork session state
+.slim/deepwork/
+
+# oh-my-agent runtime (local artifacts — do not commit)
+.antigravitycli/
+.agents/results/
+.agents/state/
+.agents/backup/
+docs/plans/
+.migration-backup/
+.qwen/tmp/
