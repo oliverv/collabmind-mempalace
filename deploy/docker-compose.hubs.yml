@@ -1,0 +1,113 @@
+# MemPalace — all local hubs in one place.
+#
+# Two independent hubs, each with its own storage backend.
+# Single-writer rule: each hub is the ONLY writable process for its palace.
+#
+# Usage:
+#   docker compose -f deploy/docker-compose.hubs.yml --env-file deploy/hubs.env up -d
+#   docker compose -f deploy/docker-compose.hubs.yml --env-file deploy/hubs.env ps
+#   docker compose -f deploy/docker-compose.hubs.yml --env-file deploy/hubs.env logs -f hub1
+#   docker compose -f deploy/docker-compose.hubs.yml --env-file deploy/hubs.env restart hub2
+#
+# Hub layout:
+#   hub1  ~/.mempalace   Qdrant (memlord-qdrant:6233, shared)  proxy:8765  hub:8766
+#   hub2  ~/.mempalace2  Chroma (chroma2, compose-managed)      proxy:8767  hub:8768
+#
+# The launchd proxy job (com.mempalace.proxy) fronts hub1 on 8765/8766.
+
+name: mempalace-hubs
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # hub1 — ~/.mempalace — Qdrant backend (shared memlord-qdrant on host:6233)
+  # ---------------------------------------------------------------------------
+  hub1:
+    build:
+      context: /Users/oliververmeulen/collabmind-mempalace
+      dockerfile: Dockerfile
+    image: mempalace:local
+    container_name: mempalace-hub-1
+    command: [serve, --host, "0.0.0.0", --port, "8766"]
+    user: "501:20"
+    ports:
+      - "127.0.0.1:8766:8766"
+    volumes:
+      # /data/.cache (embedding model cache) intentionally lives in this hub's
+      # docker-root/.cache. Do NOT bind-mount the shared host ~/.cache: when a
+      # host tool recreates it, the container keeps a stale "deleted" mount.
+      - /Users/oliververmeulen/.mempalace/docker-root:/data
+      - /Users/oliververmeulen/.mempalace:/data/.mempalace
+    environment:
+      MEMPALACE_BACKEND: qdrant
+      MEMPALACE_PALACE_PATH: /data/.mempalace/palace
+      MEMPALACE_QDRANT_URL: "http://host.docker.internal:6233"
+      MEMPALACE_QDRANT_API_KEY: "${HUB1_QDRANT_API_KEY}"
+      MEMPALACE_QDRANT_NAMESPACE: "${HUB1_QDRANT_NAMESPACE}"
+      MEMPALACE_MCP_HTTP_TOKEN: "${HUB1_TOKEN}"
+      MEMPALACE_EMBEDDING_DEVICE: auto
+      MEMPALACE_HUB_FORWARD: "0"
+      MEMPALACE_MCP_EXTRA_ALLOWED_HOSTS: "*"
+      PYTHONUNBUFFERED: "1"
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:8766/healthz').read().strip()==b'ok' else sys.exit(1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  # ---------------------------------------------------------------------------
+  # hub2 — ~/.mempalace2 — Chroma backend (compose-managed ChromaDB)
+  # ---------------------------------------------------------------------------
+  chroma2:
+    image: chromadb/chroma:latest
+    container_name: mempalace2-chroma
+    restart: unless-stopped
+    volumes:
+      - chroma2-storage:/chroma/chroma
+    environment:
+      IS_PERSISTENT: "TRUE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+    # Not published to host: only hub2 reaches it over the internal network.
+
+  hub2:
+    build:
+      context: /Users/oliververmeulen/collabmind-mempalace
+      dockerfile: Dockerfile
+    image: mempalace:local
+    container_name: mempalace-hub-2
+    depends_on:
+      chroma2:
+        condition: service_started
+    command: [serve, --host, "0.0.0.0", --port, "8768"]
+    user: "501:20"
+    ports:
+      - "127.0.0.1:8768:8768"
+      - "127.0.0.1:8767:8768"
+    volumes:
+      # /data/.cache (embedding model cache) intentionally lives in this hub's
+      # docker-root/.cache. Do NOT bind-mount the shared host ~/.cache: when a
+      # host tool recreates it, the container keeps a stale "deleted" mount.
+      - /Users/oliververmeulen/.mempalace2/docker-root:/data
+      - /Users/oliververmeulen/.mempalace2:/data/.mempalace
+    environment:
+      MEMPALACE_BACKEND: chroma
+      MEMPALACE_PALACE_PATH: /data/.mempalace/palace
+      MEMPALACE_CHROMA_HOST: chroma2
+      MEMPALACE_CHROMA_PORT: "8000"
+      MEMPALACE_MCP_HTTP_TOKEN: "${HUB2_TOKEN}"
+      MEMPALACE_EMBEDDING_DEVICE: auto
+      MEMPALACE_HUB_FORWARD: "0"
+      MEMPALACE_MCP_EXTRA_ALLOWED_HOSTS: "*"
+      PYTHONUNBUFFERED: "1"
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:8768/healthz').read().strip()==b'ok' else sys.exit(1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  chroma2-storage:
